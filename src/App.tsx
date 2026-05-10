@@ -13,9 +13,29 @@ interface Proposta {
   edital_id: number;
   titulo: string;
   valor: number;
+  user_id: string;
+}
+
+interface ContratacaoPNCP {
+  objetoContratacao: string;
+  numeroContratacao: string;
+  orgaoEntidade: {
+    razaoSocial: string;
+    cnpj: string;
+  };
+  dataPublicacaoPncp: string;
+  unidadeOrgao: {
+    nomeUnidade: string;
+  };
 }
 
 function App() {
+  const [session, setSession] = useState<any>(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isLogin, setIsLogin] = useState(true);
+  const [authError, setAuthError] = useState('');
+
   const [editais, setEditais] = useState<Edital[]>([]);
   const [propostas, setPropostas] = useState<Proposta[]>([]);
   const [selectedEdital, setSelectedEdital] = useState('');
@@ -25,57 +45,146 @@ function App() {
   const [editandoTitulo, setEditandoTitulo] = useState('');
   const [editandoValor, setEditandoValor] = useState('');
 
+  // Estados para a busca de editais via PNCP
+  const [termoBusca, setTermoBusca] = useState('');
+  const [resultadosBusca, setResultadosBusca] = useState<ContratacaoPNCP[]>([]);
+  const [carregandoBusca, setCarregandoBusca] = useState(false);
+  const [erroBusca, setErroBusca] = useState('');
+
+  // Autenticação e carregamento de dados
   useEffect(() => {
-    carregarEditais();
-    carregarPropostas();
+    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
+    return () => listener?.subscription.unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (session) {
+      carregarEditais();
+      carregarPropostas();
+    }
+  }, [session]);
+
+  async function handleAuth(e: React.FormEvent) {
+    e.preventDefault();
+    setAuthError('');
+    if (isLogin) {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) setAuthError(error.message);
+    } else {
+      const { error } = await supabase.auth.signUp({ email, password });
+      if (error) setAuthError(error.message);
+      else alert('Cadastro realizado! Faça login.');
+    }
+  }
+
+  async function logout() {
+    await supabase.auth.signOut();
+    setSession(null);
+  }
+
   async function carregarEditais() {
-    const { data, error } = await supabase.from('editais').select('*');
-    if (error) console.error(error);
-    else setEditais(data || []);
+    const { data } = await supabase.from('editais').select('*');
+    if (data) setEditais(data);
   }
 
   async function carregarPropostas() {
-    const { data, error } = await supabase.from('propostas').select('*');
-    if (error) console.error(error);
-    else setPropostas(data || []);
+    const { data } = await supabase.from('propostas').select('*').eq('user_id', session.user.id);
+    if (data) setPropostas(data);
   }
 
   async function criarProposta(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedEdital || !titulo) return;
-    const { error } = await supabase.from('propostas').insert({
+    await supabase.from('propostas').insert({
       edital_id: parseInt(selectedEdital),
       titulo,
       valor: parseFloat(valor) || 0,
+      user_id: session.user.id,
     });
-    if (error) {
-      alert('Erro: ' + error.message);
-    } else {
-      setTitulo('');
-      setValor('');
-      carregarPropostas();
-    }
+    setTitulo('');
+    setValor('');
+    carregarPropostas();
   }
 
   async function atualizarProposta(id: number, novoTitulo: string, novoValor: number) {
-    const { error } = await supabase.from('propostas').update({ titulo: novoTitulo, valor: novoValor }).eq('id', id);
-    if (error) alert('Erro ao atualizar');
-    else {
-      setEditandoId(null);
-      carregarPropostas();
-    }
+    await supabase.from('propostas').update({ titulo: novoTitulo, valor: novoValor }).eq('id', id);
+    setEditandoId(null);
+    carregarPropostas();
   }
 
   async function excluirProposta(id: number) {
     if (confirm('Deseja realmente excluir?')) {
-      const { error } = await supabase.from('propostas').delete().eq('id', id);
-      if (error) alert('Erro ao excluir');
-      else carregarPropostas();
+      await supabase.from('propostas').delete().eq('id', id);
+      carregarPropostas();
     }
   }
 
+  // Busca editais na API do PNCP via edge function
+  const buscarEditaisPNCP = async () => {
+    if (!termoBusca.trim()) return;
+    setCarregandoBusca(true);
+    setErroBusca('');
+    setResultadosBusca([]);
+
+    try {
+      const hoje = new Date();
+      const dataFormatada = hoje.toISOString().slice(0, 10).replace(/-/g, '');
+      const resposta = await fetch(`/api/contratacoes?dataInicial=${dataFormatada}&uf=SP&pagina=1`);
+      if (!resposta.ok) throw new Error('Erro ao buscar dados.');
+      const dados = await resposta.json();
+
+      const filtrados = dados.filter((item: ContratacaoPNCP) =>
+        item.objetoContratacao?.toLowerCase().includes(termoBusca.toLowerCase())
+      );
+      setResultadosBusca(filtrados.slice(0, 20));
+    } catch (err: any) {
+      setErroBusca(err.message);
+    } finally {
+      setCarregandoBusca(false);
+    }
+  };
+
+  // Tela de login/cadastro
+  if (!session) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <div className="bg-white p-8 rounded-lg shadow-md w-96">
+          <h1 className="text-2xl font-bold mb-4 text-center">📋 Licitações</h1>
+          <form onSubmit={handleAuth}>
+            <input
+              type="email"
+              placeholder="E-mail"
+              className="w-full border rounded p-2 mb-3"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              required
+            />
+            <input
+              type="password"
+              placeholder="Senha"
+              className="w-full border rounded p-2 mb-3"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+            />
+            {authError && <p className="text-red-500 text-sm mb-3">{authError}</p>}
+            <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700">
+              {isLogin ? 'Entrar' : 'Cadastrar'}
+            </button>
+          </form>
+          <button
+            onClick={() => setIsLogin(!isLogin)}
+            className="w-full text-sm text-blue-600 mt-3 hover:underline"
+          >
+            {isLogin ? 'Criar nova conta' : 'Já tenho conta'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Área logada
   const totalPropostas = propostas.length;
   const somaValores = propostas.reduce((acc, p) => acc + (p.valor || 0), 0);
   const valorMedio = totalPropostas ? (somaValores / totalPropostas).toFixed(2) : 0;
@@ -83,9 +192,49 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-100 p-6">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold text-gray-800 mb-6">📋 Módulo de Licitações</h1>
+        <div className="flex justify-between items-center mb-6">
+          <h1 className="text-3xl font-bold text-gray-800">📋 Módulo de Licitações</h1>
+          <button onClick={logout} className="bg-red-500 text-white px-3 py-1 rounded text-sm">Sair</button>
+        </div>
 
-        {/* Cards */}
+        {/* Busca de editais reais */}
+        <div className="bg-white rounded-lg shadow p-6 mb-8">
+          <h2 className="text-xl font-semibold mb-4">🔍 Buscar Editais Reais (PNCP)</h2>
+          <div className="flex gap-2 mb-4">
+            <input
+              type="text"
+              value={termoBusca}
+              onChange={(e) => setTermoBusca(e.target.value)}
+              placeholder="Ex: pavimentação, esgoto, ETE..."
+              className="flex-1 border rounded-md p-2"
+            />
+            <button
+              onClick={buscarEditaisPNCP}
+              disabled={carregandoBusca}
+              className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700"
+            >
+              {carregandoBusca ? 'Buscando...' : 'Pesquisar'}
+            </button>
+          </div>
+          {erroBusca && <p className="text-red-500 text-sm">{erroBusca}</p>}
+          {resultadosBusca.length > 0 && (
+            <div>
+              <h3 className="font-semibold mb-2">Resultados encontrados:</h3>
+              <ul className="space-y-2">
+                {resultadosBusca.map((item, idx) => (
+                  <li key={idx} className="border-b pb-2">
+                    <p className="font-medium">{item.objetoContratacao?.substring(0, 150)}...</p>
+                    <p className="text-sm text-gray-600">
+                      Órgão: {item.orgaoEntidade?.razaoSocial || 'N/I'} | Data: {item.dataPublicacaoPncp}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        {/* Cards de métricas */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
           <div className="bg-white rounded-lg shadow p-5">
             <h3 className="text-gray-500 text-sm uppercase">Total de Propostas</h3>
@@ -101,7 +250,7 @@ function App() {
           </div>
         </div>
 
-        {/* Formulário */}
+        {/* Formulário de nova proposta */}
         <div className="bg-white rounded-lg shadow p-6 mb-8">
           <h2 className="text-xl font-semibold mb-4">➕ Nova Proposta</h2>
           <form onSubmit={criarProposta} className="flex flex-col md:flex-row gap-4">
