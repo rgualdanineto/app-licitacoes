@@ -1,13 +1,7 @@
 {
   "functions": {
-    "api/buscar.js": {
+    "api/*.js": {
       "runtime": "nodejs20.x"
     }
-  },
-  "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "/api/$1"
-    }
-  ]
+  }
 }
